@@ -1,0 +1,102 @@
+"""
+Unit tests for the vision pipeline — mock vLLM responses, no GPU required.
+"""
+import json
+import unittest
+from unittest.mock import patch, MagicMock
+
+from vision_pipeline import parse_json_response, run_pipeline, encode_image_base64
+
+
+MOCK_CLASSIFICATION = {
+    "drawing_type": "floor_plan",
+    "confidence": 0.92,
+    "scale": "1:100",
+    "north_arrow_present": True,
+    "grid_lines_present": True,
+    "notes": "Residential floor plan, 3 storeys apparent",
+}
+
+MOCK_PARAMS = {
+    "estimated_storeys": 3,
+    "estimated_gfa_m2": 280.0,
+    "building_footprint_m2": 95.0,
+    "apparent_use": "Residential",
+    "construction_clues": "Masonry walls indicated by hatching",
+    "has_basement": False,
+    "has_atrium": False,
+    "room_count": 12,
+    "circulation_notes": "Central stair core, corridors >1.2m wide",
+    "fire_compartment_walls": True,
+    "accessible_entrance": True,
+    "extraction_confidence": 0.80,
+}
+
+MOCK_RISKS = [
+    {
+        "regulation": "Doc B §B1",
+        "observation": "Travel distance from far bedroom to stair appears ~20m",
+        "risk_level": "low",
+        "action": "Verify travel distance does not exceed 18m for single-direction escape",
+    }
+]
+
+
+class TestParseJsonResponse(unittest.TestCase):
+    def test_clean_json(self):
+        raw = '{"key": "value"}'
+        result = parse_json_response(raw)
+        self.assertEqual(result["key"], "value")
+
+    def test_markdown_fenced_json(self):
+        raw = '```json\n{"key": "value"}\n```'
+        result = parse_json_response(raw)
+        self.assertEqual(result["key"], "value")
+
+    def test_json_array(self):
+        raw = '[{"a": 1}, {"b": 2}]'
+        result = parse_json_response(raw)
+        self.assertEqual(len(result), 2)
+
+    def test_invalid_json_raises(self):
+        with self.assertRaises(json.JSONDecodeError):
+            parse_json_response("not json at all")
+
+
+class TestRunPipeline(unittest.TestCase):
+    @patch("vision_pipeline.identify_compliance_risks")
+    @patch("vision_pipeline.extract_building_params")
+    @patch("vision_pipeline.classify_drawing")
+    @patch("vision_pipeline.encode_image_base64")
+    def test_full_pipeline(self, mock_encode, mock_classify, mock_extract, mock_risks):
+        mock_encode.return_value = "base64data"
+        mock_classify.return_value = MOCK_CLASSIFICATION
+        mock_extract.return_value = MOCK_PARAMS
+        mock_risks.return_value = MOCK_RISKS
+
+        result = run_pipeline("test.png")
+
+        self.assertEqual(result["classification"]["drawing_type"], "floor_plan")
+        self.assertEqual(result["building_parameters"]["buildingUse"], "Residential")
+        self.assertEqual(result["building_parameters"]["numberOfStoreys"], 3)
+        self.assertEqual(result["building_parameters"]["floorAreaM2"], 280)
+        self.assertEqual(len(result["compliance_risks"]), 1)
+
+    @patch("vision_pipeline.identify_compliance_risks")
+    @patch("vision_pipeline.extract_building_params")
+    @patch("vision_pipeline.classify_drawing")
+    @patch("vision_pipeline.encode_image_base64")
+    def test_occupancy_calculation(self, mock_encode, mock_classify, mock_extract, mock_risks):
+        mock_encode.return_value = "base64data"
+        mock_classify.return_value = MOCK_CLASSIFICATION
+        params = {**MOCK_PARAMS, "estimated_gfa_m2": 150.0}
+        mock_extract.return_value = params
+        mock_risks.return_value = []
+
+        result = run_pipeline("test.png")
+        # occupancy = max(1, int(150 / 15)) = 10
+        self.assertEqual(result["building_parameters"]["occupancyEstimate"], 10)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
