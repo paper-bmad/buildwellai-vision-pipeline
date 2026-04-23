@@ -11,32 +11,11 @@ import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
-
-from vision_pipeline import run_pipeline, VLLM_BASE_URL
+from vision_pipeline import run_pipeline, call_compliance_api, VLLM_BASE_URL
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"}
 
 COMPLIANCE_DOMAINS_DEFAULT = ["fire_safety", "ventilation", "structural", "energy"]
-
-
-def call_compliance_api(building_params: dict, compliance_url: str, additional_context: str = "") -> dict:
-    query = {
-        "buildingParameters": {
-            "buildingUse": building_params["buildingUse"],
-            "constructionType": building_params["constructionType"],
-            "numberOfStoreys": building_params["numberOfStoreys"],
-            "floorAreaM2": building_params["floorAreaM2"],
-            "occupancyEstimate": building_params["occupancyEstimate"],
-            "hasBasement": building_params["hasBasement"],
-            "hasAtrium": building_params["hasAtrium"],
-        },
-        "domains": COMPLIANCE_DOMAINS_DEFAULT,
-        "additionalContext": additional_context,
-    }
-    resp = requests.post(f"{compliance_url}/check", json=query, timeout=60)
-    resp.raise_for_status()
-    return resp.json()
 
 
 def process_image(image_path: Path, vllm_server: str, compliance_url: str | None) -> dict:
@@ -59,7 +38,8 @@ def process_image(image_path: Path, vllm_server: str, compliance_url: str | None
                                      "; ".join(r.get("observation", "") for r in risks[:3]))
             context = ". ".join(context_parts)
             result["compliance"] = call_compliance_api(
-                vision_result["building_parameters"], compliance_url, context
+                vision_result["building_parameters"], compliance_url,
+                COMPLIANCE_DOMAINS_DEFAULT, context
             )
 
         return result

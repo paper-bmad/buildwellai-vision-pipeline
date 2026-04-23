@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import patch, MagicMock
 
-from vision_pipeline import parse_json_response, run_pipeline, encode_image_base64
+from vision_pipeline import parse_json_response, run_pipeline, encode_image_base64, normalize_construction_type
 
 
 MOCK_CLASSIFICATION = {
@@ -40,6 +40,32 @@ MOCK_RISKS = [
         "action": "Verify travel distance does not exceed 18m for single-direction escape",
     }
 ]
+
+
+class TestNormalizeConstructionType(unittest.TestCase):
+    def test_masonry_keyword(self):
+        self.assertEqual(normalize_construction_type("Masonry walls indicated by hatching"), "Masonry")
+
+    def test_brick_keyword(self):
+        self.assertEqual(normalize_construction_type("Brick cavity wall construction"), "Masonry")
+
+    def test_timber_frame(self):
+        self.assertEqual(normalize_construction_type("Timber stud frame visible"), "Timber Frame")
+
+    def test_steel_frame(self):
+        self.assertEqual(normalize_construction_type("Steel structural frame with metal decking"), "Steel Frame")
+
+    def test_concrete_frame(self):
+        self.assertEqual(normalize_construction_type("RC columns and flat slab"), "Concrete Frame")
+
+    def test_clt(self):
+        self.assertEqual(normalize_construction_type("Cross Laminated Timber panels"), "Cross Laminated Timber")
+
+    def test_empty_defaults_to_masonry(self):
+        self.assertEqual(normalize_construction_type(""), "Masonry")
+
+    def test_unknown_defaults_to_masonry(self):
+        self.assertEqual(normalize_construction_type("Unknown construction method"), "Masonry")
 
 
 class TestParseJsonResponse(unittest.TestCase):
@@ -80,6 +106,9 @@ class TestRunPipeline(unittest.TestCase):
         self.assertEqual(result["building_parameters"]["buildingUse"], "Residential")
         self.assertEqual(result["building_parameters"]["numberOfStoreys"], 3)
         self.assertEqual(result["building_parameters"]["floorAreaM2"], 280)
+        self.assertEqual(result["building_parameters"]["constructionType"], "Masonry")
+        self.assertIn(result["building_parameters"]["constructionType"],
+                      ["Timber Frame", "Masonry", "Steel Frame", "Concrete Frame", "Cross Laminated Timber"])
         self.assertEqual(len(result["compliance_risks"]), 1)
 
     @patch("vision_pipeline.identify_compliance_risks")

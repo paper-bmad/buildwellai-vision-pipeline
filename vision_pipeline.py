@@ -79,6 +79,58 @@ Return a JSON array of findings:
 Return ONLY the JSON array, no explanation."""
 
 
+VALID_CONSTRUCTION_TYPES = [
+    "Timber Frame",
+    "Masonry",
+    "Steel Frame",
+    "Concrete Frame",
+    "Cross Laminated Timber",
+]
+
+
+def normalize_construction_type(description: str) -> str:
+    """Map free-text construction description to a valid ConstructionType enum value."""
+    if not description:
+        return "Masonry"
+    desc = description.lower()
+    if "clt" in desc or "cross laminated" in desc or "cross-laminated" in desc:
+        return "Cross Laminated Timber"
+    if "timber" in desc or "wood" in desc or "lumber" in desc:
+        return "Timber Frame"
+    if "steel" in desc or "structural steel" in desc or "metal frame" in desc:
+        return "Steel Frame"
+    if "concrete" in desc or "rc " in desc or "reinforced" in desc or "precast" in desc:
+        return "Concrete Frame"
+    if "masonry" in desc or "brick" in desc or "block" in desc or "stone" in desc:
+        return "Masonry"
+    return "Masonry"  # safe default
+
+
+def call_compliance_api(building_params: dict, compliance_url: str,
+                        domains: list[str] | None = None,
+                        additional_context: str = "") -> dict:
+    """POST building parameters to the BuildwellAI compliance API and return the report."""
+    if domains is None:
+        domains = ["fire_safety", "structural", "ventilation", "energy"]
+    query = {
+        "buildingParameters": {
+            "buildingUse": building_params["buildingUse"],
+            "constructionType": building_params["constructionType"],
+            "numberOfStoreys": building_params["numberOfStoreys"],
+            "floorAreaM2": building_params["floorAreaM2"],
+            "occupancyEstimate": building_params["occupancyEstimate"],
+            "hasBasement": building_params["hasBasement"],
+            "hasAtrium": building_params["hasAtrium"],
+        },
+        "domains": domains,
+        "additionalContext": additional_context,
+    }
+    import requests as _requests
+    resp = _requests.post(f"{compliance_url}/check", json=query, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def encode_image_base64(image_path: str) -> str:
     path = Path(image_path)
     if not path.exists():
@@ -168,12 +220,14 @@ def run_pipeline(image_path: str, server: str = VLLM_BASE_URL) -> dict:
     risks = identify_compliance_risks(image_b64, drawing_type, building_use, server)
     print(f"      → {len(risks)} potential compliance items found")
 
+    construction_type = normalize_construction_type(params.get("construction_clues") or "")
+
     result = {
         "image_path": str(image_path),
         "classification": classification,
         "building_parameters": {
             "buildingUse": building_use,
-            "constructionType": params.get("construction_clues", "Unknown"),
+            "constructionType": construction_type,
             "numberOfStoreys": params.get("estimated_storeys") or 2,
             "floorAreaM2": int(params.get("estimated_gfa_m2") or 200),
             "occupancyEstimate": max(1, int((params.get("estimated_gfa_m2") or 200) / 15)),
@@ -191,32 +245,66 @@ def main():
     parser.add_argument("--image", required=True, help="Path to architectural drawing image")
     parser.add_argument("--server", default=VLLM_BASE_URL, help="vLLM server URL")
     parser.add_argument("--output", help="Output JSON file (default: stdout)")
+    parser.add_argument("--compliance-url", default=None,
+                        help="BuildwellAI compliance API URL — triggers a full compliance check after extraction")
+    parser.add_argument("--domains", default=None,
+                        help="Comma-separated compliance domains (default: fire_safety,structural,ventilation,energy)")
     args = parser.parse_args()
 
     result = run_pipeline(args.image, args.server)
 
+    domains = [d.strip() for d in args.domains.split(",")] if args.domains else None
+
+    if args.compliance_url:
+        print(f"\n[+] Running compliance check via {args.compliance_url}...")
+        bp = result["building_parameters"]
+        risks = result.get("compliance_risks", [])
+        context_parts = [f"Drawing type: {result['classification']['drawing_type']}"]
+        if risks:
+            context_parts.append(
+                f"Vision analysis flagged {len(risks)} items: " +
+                "; ".join(r.get("observation", "") for r in risks[:3])
+            )
+        try:
+            compliance_report = call_compliance_api(
+                bp, args.compliance_url, domains, ". ".join(context_parts)
+            )
+            result["compliance_report"] = compliance_report
+            status = compliance_report.get("overallStatus", "?")
+            print(f"      → Overall status: {status.upper().replace('_', ' ')}")
+        except Exception as e:
+            print(f"      ✗ Compliance API error: {e}", file=sys.stderr)
+            result["compliance_report"] = {"error": str(e)}
+
     output = json.dumps(result, indent=2)
     if args.output:
         Path(args.output).write_text(output)
-        print(f"Results written to {args.output}")
+        print(f"\nResults written to {args.output}")
     else:
         print("\n=== Vision Pipeline Results ===")
         print(output)
 
     # Print compliance-ready building parameters for use with the compliance checker
     bp = result["building_parameters"]
-    print("\n=== Compliance Checker Parameters (copy to SiteInspectionApp) ===")
-    print(f"Building Use: {bp['buildingUse']}")
-    print(f"Storeys: {bp['numberOfStoreys']}")
-    print(f"Floor Area: {bp['floorAreaM2']}m²")
-    print(f"Occupancy: {bp['occupancyEstimate']}")
-    print(f"Basement: {bp['hasBasement']}")
+    print("\n=== Compliance Checker Parameters ===")
+    print(f"Building Use:      {bp['buildingUse']}")
+    print(f"Construction Type: {bp['constructionType']}")
+    print(f"Storeys:           {bp['numberOfStoreys']}")
+    print(f"Floor Area:        {bp['floorAreaM2']}m²")
+    print(f"Occupancy:         {bp['occupancyEstimate']}")
+    print(f"Basement:          {bp['hasBasement']}")
 
     if result["compliance_risks"]:
         print(f"\n=== {len(result['compliance_risks'])} Compliance Risk(s) Identified ===")
         for r in result["compliance_risks"]:
             level = r.get("risk_level", "?").upper()
             print(f"[{level}] {r.get('regulation', '?')}: {r.get('observation', '')}")
+
+    if "compliance_report" in result and "error" not in result["compliance_report"]:
+        report = result["compliance_report"]
+        print(f"\n=== Compliance Report: {report.get('overallStatus','?').upper().replace('_',' ')} ===")
+        for domain in report.get("domains", []):
+            print(f"  {domain['label']}: {domain['status'].replace('_',' ')}")
 
 
 if __name__ == "__main__":
