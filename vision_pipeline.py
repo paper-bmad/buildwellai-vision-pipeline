@@ -17,7 +17,6 @@ import sys
 from pathlib import Path
 
 import requests
-from PIL import Image
 
 
 VLLM_BASE_URL = "http://localhost:8000"
@@ -132,6 +131,7 @@ def call_compliance_api(building_params: dict, compliance_url: str,
 
 
 def encode_image_base64(image_path: str) -> str:
+    from PIL import Image  # lazy: only needed when processing real images
     path = Path(image_path)
     if not path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
