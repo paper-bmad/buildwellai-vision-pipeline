@@ -36,7 +36,7 @@ MOCK_RISKS = [
     {
         "regulation": "Doc B §B1",
         "observation": "Travel distance from far bedroom to stair appears ~20m",
-        "risk_level": "low",
+        "riskLevel": "low",
         "action": "Verify travel distance does not exceed 18m for single-direction escape",
     }
 ]

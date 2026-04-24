@@ -70,7 +70,7 @@ Return a JSON array of findings:
   {{
     "regulation": "<Doc X clause>",
     "observation": "<what was observed>",
-    "risk_level": "<low|medium|high>",
+    "riskLevel": "<low|medium|high>",
     "action": "<recommended action>"
   }}
 ]
@@ -124,8 +124,7 @@ def call_compliance_api(building_params: dict, compliance_url: str,
         "domains": domains,
         "additionalContext": additional_context,
     }
-    import requests as _requests
-    resp = _requests.post(f"{compliance_url}/check", json=query, timeout=60)
+    resp = requests.post(f"{compliance_url}/check", json=query, timeout=60)
     resp.raise_for_status()
     return resp.json()
 
@@ -297,7 +296,7 @@ def main():
     if result["compliance_risks"]:
         print(f"\n=== {len(result['compliance_risks'])} Compliance Risk(s) Identified ===")
         for r in result["compliance_risks"]:
-            level = r.get("risk_level", "?").upper()
+            level = r.get("riskLevel", "?").upper()
             print(f"[{level}] {r.get('regulation', '?')}: {r.get('observation', '')}")
 
     if "compliance_report" in result and "error" not in result["compliance_report"]:
