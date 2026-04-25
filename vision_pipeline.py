@@ -14,6 +14,7 @@ import base64
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -107,8 +108,13 @@ def normalize_construction_type(description: str) -> str:
 
 def call_compliance_api(building_params: dict, compliance_url: str,
                         domains: list[str] | None = None,
-                        additional_context: str = "") -> dict:
-    """POST building parameters to the BuildwellAI compliance API and return the report."""
+                        additional_context: str = "",
+                        max_retries: int = 3) -> dict:
+    """POST building parameters to the BuildwellAI compliance API and return the report.
+
+    Retries on HTTP 429 (rate limited) up to max_retries times, honouring the
+    Retry-After header returned by the compliance server.
+    """
     if domains is None:
         domains = ["fire_safety", "structural", "ventilation", "energy"]
     query = {
@@ -124,9 +130,18 @@ def call_compliance_api(building_params: dict, compliance_url: str,
         "domains": domains,
         "additionalContext": additional_context,
     }
-    resp = requests.post(f"{compliance_url}/check", json=query, timeout=60)
+    for attempt in range(max_retries):
+        resp = requests.post(f"{compliance_url}/check", json=query, timeout=60)
+        if resp.status_code == 429 and attempt < max_retries - 1:
+            retry_after = int(resp.headers.get("Retry-After", "5"))
+            print(f"      Rate limited — retrying in {retry_after}s "
+                  f"(attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+            time.sleep(retry_after)
+            continue
+        resp.raise_for_status()
+        return resp.json()
     resp.raise_for_status()
-    return resp.json()
+    return resp.json()  # unreachable, satisfies type checkers
 
 
 def encode_image_base64(image_path: str) -> str:

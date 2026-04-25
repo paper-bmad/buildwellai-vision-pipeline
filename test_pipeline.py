@@ -3,9 +3,14 @@ Unit tests for the vision pipeline — mock vLLM responses, no GPU required.
 """
 import json
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
-from vision_pipeline import parse_json_response, run_pipeline, encode_image_base64, normalize_construction_type
+import requests
+
+from vision_pipeline import (
+    parse_json_response, run_pipeline, encode_image_base64,
+    normalize_construction_type, call_compliance_api,
+)
 
 
 MOCK_CLASSIFICATION = {
@@ -125,6 +130,83 @@ class TestRunPipeline(unittest.TestCase):
         result = run_pipeline("test.png")
         # occupancy = max(1, int(150 / 15)) = 10
         self.assertEqual(result["building_parameters"]["occupancyEstimate"], 10)
+
+
+MOCK_BUILDING_PARAMS = {
+    "buildingUse": "Residential",
+    "constructionType": "Masonry",
+    "numberOfStoreys": 2,
+    "floorAreaM2": 120,
+    "occupancyEstimate": 4,
+    "hasBasement": False,
+    "hasAtrium": False,
+}
+
+
+class TestCallComplianceApi(unittest.TestCase):
+    @patch("vision_pipeline.requests.post")
+    def test_success(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"overallStatus": "compliant"}
+        mock_post.return_value = mock_resp
+
+        result = call_compliance_api(MOCK_BUILDING_PARAMS, "http://localhost:3001")
+
+        self.assertEqual(result["overallStatus"], "compliant")
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("vision_pipeline.time.sleep")
+    @patch("vision_pipeline.requests.post")
+    def test_retries_on_429_then_succeeds(self, mock_post, mock_sleep):
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "3"}
+
+        success = MagicMock()
+        success.status_code = 200
+        success.json.return_value = {"overallStatus": "compliant"}
+
+        mock_post.side_effect = [rate_limited, success]
+
+        result = call_compliance_api(MOCK_BUILDING_PARAMS, "http://localhost:3001", max_retries=3)
+
+        self.assertEqual(result["overallStatus"], "compliant")
+        self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called_once_with(3)
+
+    @patch("vision_pipeline.time.sleep")
+    @patch("vision_pipeline.requests.post")
+    def test_raises_after_exhausted_retries(self, mock_post, mock_sleep):
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {"Retry-After": "1"}
+        rate_limited.raise_for_status.side_effect = requests.HTTPError("429")
+
+        mock_post.return_value = rate_limited
+
+        with self.assertRaises(requests.HTTPError):
+            call_compliance_api(MOCK_BUILDING_PARAMS, "http://localhost:3001", max_retries=2)
+
+        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    @patch("vision_pipeline.requests.post")
+    def test_uses_retry_after_default_when_header_absent(self, mock_post):
+        rate_limited = MagicMock()
+        rate_limited.status_code = 429
+        rate_limited.headers = {}  # no Retry-After
+
+        success = MagicMock()
+        success.status_code = 200
+        success.json.return_value = {"overallStatus": "requires_review"}
+        mock_post.side_effect = [rate_limited, success]
+
+        with patch("vision_pipeline.time.sleep") as mock_sleep:
+            result = call_compliance_api(MOCK_BUILDING_PARAMS, "http://localhost:3001", max_retries=3)
+            mock_sleep.assert_called_once_with(5)  # default fallback
+
+        self.assertEqual(result["overallStatus"], "requires_review")
 
 
 if __name__ == "__main__":
