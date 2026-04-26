@@ -1,13 +1,19 @@
 """
 BuildwellAI Vision Pipeline — Architectural Drawing Analysis
-Uses Gemma 4 (multimodal) via vLLM for floor plan understanding.
+Uses a multimodal LLM (Gemma 4 or Skywork R1V2-38B) via vLLM for floor plan understanding.
 
 Requirements:
   pip install vllm pillow requests
-  vLLM v0.19.0+ (for Gemma 4 multimodal support)
+  vLLM v0.19.0+ (Gemma 4) or vLLM ≥ latest (Skywork R1V2 with trust_remote_code)
+
+Model selection:
+  - Gemma 4 (default): general multimodal, Apache 2.0
+  - Skywork R1V2-38B: stronger on documents/charts/STEM diagrams; MIT licensed;
+    single-GPU AWQ deployment. Better fit for architectural drawing analysis.
 
 Usage:
   python vision_pipeline.py --image floor_plan.png [--server http://localhost:8000]
+  python vision_pipeline.py --image floor_plan.png --model r1v2  # use Skywork R1V2-38B
 """
 import argparse
 import base64
@@ -21,7 +27,17 @@ import requests
 
 
 VLLM_BASE_URL = "http://localhost:8000"
-GEMMA4_MODEL = "google/gemma-4-27b-it"  # or gemma-4-e4b-it for faster inference
+
+# Model registry: short alias → vLLM/HF model id
+MODELS = {
+    "gemma4-27b":   "google/gemma-4-27b-it",
+    "gemma4-12b":   "google/gemma-4-12b-it",
+    "gemma4-e4b":   "google/gemma-4-e4b-it",
+    "r1v2":         "Skywork/Skywork-R1V2-38B",
+    "r1v2-awq":     "Skywork/Skywork-R1V2-38B-AWQ",
+}
+DEFAULT_MODEL_ALIAS = "gemma4-27b"
+GEMMA4_MODEL = MODELS[DEFAULT_MODEL_ALIAS]  # backwards compat for callers
 
 CLASSIFY_PROMPT = """Analyze this architectural drawing and classify it.
 
@@ -198,46 +214,47 @@ def parse_json_response(raw: str) -> dict | list:
         return json.loads(raw.strip())
 
 
-def classify_drawing(image_b64: str, server: str) -> dict:
-    raw = call_vllm(GEMMA4_MODEL, CLASSIFY_PROMPT, image_b64, server)
+def classify_drawing(image_b64: str, server: str, model: str = GEMMA4_MODEL) -> dict:
+    raw = call_vllm(model, CLASSIFY_PROMPT, image_b64, server)
     return parse_json_response(raw)
 
 
-def extract_building_params(image_b64: str, drawing_type: str, server: str) -> dict:
+def extract_building_params(image_b64: str, drawing_type: str, server: str, model: str = GEMMA4_MODEL) -> dict:
     prompt = EXTRACT_PARAMS_PROMPT.format(drawing_type=drawing_type)
-    raw = call_vllm(GEMMA4_MODEL, prompt, image_b64, server, max_tokens=768)
+    raw = call_vllm(model, prompt, image_b64, server, max_tokens=768)
     return parse_json_response(raw)
 
 
-def identify_compliance_risks(image_b64: str, drawing_type: str, building_use: str, server: str) -> list:
+def identify_compliance_risks(image_b64: str, drawing_type: str, building_use: str, server: str, model: str = GEMMA4_MODEL) -> list:
     prompt = COMPLIANCE_RISK_PROMPT.format(drawing_type=drawing_type, building_use=building_use)
-    raw = call_vllm(GEMMA4_MODEL, prompt, image_b64, server, max_tokens=1024)
+    raw = call_vllm(model, prompt, image_b64, server, max_tokens=1024)
     return parse_json_response(raw)
 
 
-def run_pipeline(image_path: str, server: str = VLLM_BASE_URL) -> dict:
+def run_pipeline(image_path: str, server: str = VLLM_BASE_URL, model: str = GEMMA4_MODEL) -> dict:
     print(f"[1/3] Encoding image: {image_path}")
     image_b64 = encode_image_base64(image_path)
 
-    print(f"[2/3] Classifying drawing type...")
-    classification = classify_drawing(image_b64, server)
+    print(f"[2/3] Classifying drawing type ({model})...")
+    classification = classify_drawing(image_b64, server, model)
     drawing_type = classification.get("drawing_type", "unknown")
     print(f"      → {drawing_type} (confidence: {classification.get('confidence', '?')})")
 
     print(f"[3/3] Extracting building parameters...")
-    params = extract_building_params(image_b64, drawing_type, server)
+    params = extract_building_params(image_b64, drawing_type, server, model)
     building_use = params.get("apparent_use", "Residential")
     print(f"      → {building_use}, ~{params.get('estimated_storeys', '?')} storeys, "
           f"~{params.get('estimated_gfa_m2', '?')}m²")
 
     print(f"[+]   Identifying compliance risks...")
-    risks = identify_compliance_risks(image_b64, drawing_type, building_use, server)
+    risks = identify_compliance_risks(image_b64, drawing_type, building_use, server, model)
     print(f"      → {len(risks)} potential compliance items found")
 
     construction_type = normalize_construction_type(params.get("construction_clues") or "")
 
     result = {
         "image_path": str(image_path),
+        "model": model,
         "classification": classification,
         "building_parameters": {
             "buildingUse": building_use,
@@ -255,9 +272,14 @@ def run_pipeline(image_path: str, server: str = VLLM_BASE_URL) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="BuildwellAI Vision Pipeline — Gemma 4 drawing analysis")
+    parser = argparse.ArgumentParser(description="BuildwellAI Vision Pipeline — multimodal drawing analysis")
     parser.add_argument("--image", required=True, help="Path to architectural drawing image")
     parser.add_argument("--server", default=VLLM_BASE_URL, help="vLLM server URL")
+    parser.add_argument("--model", default=DEFAULT_MODEL_ALIAS,
+                        choices=list(MODELS.keys()) + ["custom"],
+                        help=f"Model alias: {', '.join(MODELS.keys())}; or 'custom' to use --model-id")
+    parser.add_argument("--model-id", default=None,
+                        help="Explicit HF/vLLM model id (overrides --model). Use with --model custom.")
     parser.add_argument("--output", help="Output JSON file (default: stdout)")
     parser.add_argument("--compliance-url", default=None,
                         help="BuildwellAI compliance API URL — triggers a full compliance check after extraction")
@@ -265,7 +287,14 @@ def main():
                         help="Comma-separated compliance domains (default: fire_safety,structural,ventilation,energy)")
     args = parser.parse_args()
 
-    result = run_pipeline(args.image, args.server)
+    if args.model == "custom":
+        if not args.model_id:
+            parser.error("--model custom requires --model-id")
+        model = args.model_id
+    else:
+        model = MODELS[args.model]
+
+    result = run_pipeline(args.image, args.server, model)
 
     domains = [d.strip() for d in args.domains.split(",")] if args.domains else None
 

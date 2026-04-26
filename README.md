@@ -22,15 +22,28 @@ Floor plan / elevation / section
 
 ## Quick Start
 
-### 1. Start Gemma 4 vLLM server
+### 1. Start a vLLM server
 
 Requires: CUDA GPU(s), vLLM ≥ 0.19.0
+
+#### Option A — Gemma 4 (Apache 2.0, general multimodal)
 
 ```bash
 ./serve_gemma4.sh           # 27B — best accuracy (2× GPU)
 ./serve_gemma4.sh 12b       # 12B — balanced (1× GPU)
 ./serve_gemma4.sh e4b       # E4B 4.5B — fast inference (1× GPU)
 ```
+
+#### Option B — Skywork R1V2-38B (MIT, reasoning-focused VLM)
+
+```bash
+./serve_r1v2.sh             # AWQ — single 30GB GPU (recommended)
+./serve_r1v2.sh fp16        # FP16 — 2× A100
+```
+
+**When to pick which:**
+- Architectural drawings, schedules, technical diagrams → **R1V2-38B** (stronger on documents/charts/STEM, MMMU 73.6%)
+- General photo understanding, site condition analysis → **Gemma 4** (better RealWorldQA)
 
 The server starts on `http://localhost:8000` by default. Set `PORT=XXXX` to override.
 
@@ -45,15 +58,21 @@ pip install vllm>=0.19.0 pillow>=10.0 requests>=2.31
 ### 3. Analyse a drawing
 
 ```bash
-# Vision only — extracts params, identifies compliance risks
+# Vision only — extracts params, identifies compliance risks (default: gemma4-27b)
 python vision_pipeline.py --image floor_plan.png
+
+# Use Skywork R1V2-38B (recommended for architectural drawings)
+python vision_pipeline.py --image floor_plan.png --model r1v2-awq
 
 # Vision + compliance check (requires BuildwellAI Compliance API running)
 python vision_pipeline.py \
   --image floor_plan.png \
+  --model r1v2-awq \
   --compliance-url http://localhost:3001 \
   --domains fire_safety,structural,ventilation,energy,access
 ```
+
+**Available `--model` aliases:** `gemma4-27b`, `gemma4-12b`, `gemma4-e4b`, `r1v2`, `r1v2-awq`. Use `--model custom --model-id <hf_id>` for any other vLLM-compatible multimodal model.
 
 ### 4. Batch process a directory
 
